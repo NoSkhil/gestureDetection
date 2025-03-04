@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Touchless Interaction System</title>
+    <title>Gesture Detection Client</title>
     <style>
     body {
         font-family: sans-serif;
@@ -157,44 +157,12 @@
     .action-button.toggled {
         background-color: #2196F3;
     }
-    
-    #service-status {
-        margin-top: 30px;
-        padding: 10px;
-        background-color: #f8f8f8;
-        border: 1px solid #ddd;
-        border-radius: 5px;
-        text-align: left;
-        font-size: 12px;
-        max-height: 200px;
-        overflow-y: auto;
-    }
-    
-    .service-badge {
-        display: inline-block;
-        padding: 3px 8px;
-        margin: 2px;
-        border-radius: 12px;
-        font-size: 11px;
-        font-weight: bold;
-    }
-    
-    .service-online {
-        background-color: #dff2bf;
-        color: #4F8A10;
-    }
-    
-    .service-offline {
-        background-color: #ffbaba;
-        color: #D8000C;
-    }
     </style>
 </head>
 <body>
-    <h1>Touchless Interaction System</h1>
-    <p>Use your hand gestures to interact with the screen without touching it</p>
+    <h1>Gesture Detection Client</h1>
     
-    <div id="status">Starting touchless interaction...</div>
+    <div id="status">Starting gesture detection...</div>
 
     <div id="media-container">
         <video id="video" autoplay playsinline></video>
@@ -211,19 +179,6 @@
     </div>
     
     <div id="cursor"></div>
-    
-    <div id="interactive-area">
-        <h3>Test Your Interaction</h3>
-        <p>Point at buttons and "pinch" to click</p>
-        <button class="action-button">Button 1</button>
-        <button class="action-button">Button 2</button>
-        <button class="action-button">Button 3</button>
-    </div>
-    
-    <div id="service-status">
-        <h3>System Status</h3>
-        <div id="service-status-content">Loading status...</div>
-    </div>
 
     <script>
     // DOM Elements
@@ -237,7 +192,6 @@
     const initProgressContainer = document.getElementById('initialization-progress');
     const progressBarFill = document.querySelector('.progress-bar-fill');
     const progressText = document.querySelector('.progress-text');
-    const serviceStatusContent = document.getElementById('service-status-content');
     
     // Connection state
     let peerConnection = null;
@@ -326,52 +280,6 @@
         }
     }
     
-    // Update service status display
-    async function updateServiceStatus() {
-        try {
-            const response = await fetch('/status');
-            if (!response.ok) throw new Error('Failed to fetch status');
-            
-            const data = await response.json();
-            let html = '<div>';
-            
-            // Add system overview
-            html += `<p>Active Connections: ${data.activeConnections} | `;
-            html += `Registered Clients: ${data.registeredClients}</p>`;
-            
-            // Add service status badges
-            html += '<div>';
-            data.services.forEach(service => {
-                const statusClass = service.status === 'online' ? 'service-online' : 'service-offline';
-                html += `<span class="service-badge ${statusClass}">`;
-                html += `${service.service}: ${service.status}</span> `;
-            });
-            html += '</div>';
-            
-            // Add service details
-            data.services.forEach(service => {
-                html += `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee;">`;
-                html += `<strong>${service.service}</strong>: `;
-                
-                // Filter out common fields
-                const detailKeys = Object.keys(service).filter(key => 
-                    !['service', 'status'].includes(key));
-                
-                detailKeys.forEach(key => {
-                    html += `<br/>${key}: ${service[key]}`;
-                });
-                
-                html += '</div>';
-            });
-            
-            html += '</div>';
-            serviceStatusContent.innerHTML = html;
-        } catch (err) {
-            console.error('Error updating service status:', err);
-            serviceStatusContent.innerHTML = '<p class="service-offline">Error fetching status</p>';
-        }
-    }
-    
     // Clean up resources
     function cleanup() {
         // Stop progress timer if running
@@ -426,28 +334,32 @@
             statusText.textContent = 'Connecting...';
             statusOverlay.textContent = 'Connecting...';
             
-            // Get camera stream with standard resolution
+            
+            // Get camera stream with aggressive resolution constraints
+            // Try to get the most minimal reliable camera resolution first
             try {
+                // First, explicitly request the lowest usable resolution
+                // to minimize startup time and maximize compatibility
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: { 
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
+                        width: { exact: 320 },  // Force very low resolution
+                        height: { exact: 240 }, // to start with
                         frameRate: { ideal: 30 }
                     },
                     audio: false
                 });
                 
-                console.log("Camera initialized with standard resolution");
+                console.log("Camera initialized with 320x240 resolution");
             } catch (err) {
-                console.warn("Could not initialize camera with standard resolution, trying default:", err);
+                console.warn("Could not initialize camera with exact resolution, trying constraints:", err);
                 
-                // Fall back to browser default
+                // Fall back to more relaxed constraints
                 stream = await navigator.mediaDevices.getUserMedia({
-                    video: true,
+                    video: true,  // Just ask for any video - let the browser decide
                     audio: false
                 });
                 
-                console.log("Camera initialized with default settings");
+                console.log("Camera initialized with default resolution");
             }
             
             // Display video
@@ -465,8 +377,6 @@
                 if (peerConnection.connectionState === 'connected') {
                     isConnected = true;
                     statusText.textContent = 'Connected - Initializing Media';
-                    // Update service status when connected
-                    updateServiceStatus();
                 } else if (peerConnection.connectionState === 'failed' || 
                          peerConnection.connectionState === 'closed') {
                     handleDisconnection("Connection lost");
@@ -489,9 +399,6 @@
                 statusText.textContent = 'Connected - Waiting for video';
                 statusOverlay.textContent = 'Starting up...';
                 isConnected = true;
-                
-                // Start periodic status updates
-                setInterval(updateServiceStatus, 10000);
             };
             
             dataChannel.onclose = () => {
@@ -596,6 +503,101 @@
             
             await peerConnection.setRemoteDescription(answer);
             
+            // After 5 seconds, try to upgrade the camera resolution
+            // This helps get a quicker initial connection with the lower res,
+            // then improve quality once everything is working
+            setTimeout(async () => {
+                if (isConnected) {
+                    console.log("Attempting to upgrade video resolution to help initialize media flow");
+                    try {
+                        // Stop old tracks
+                        const oldTracks = stream.getTracks();
+                        
+                        // Get a medium resolution stream - not too high to avoid delays
+                        const mediumResStream = await navigator.mediaDevices.getUserMedia({
+                            video: { 
+                                width: { ideal: 1280 },   // Medium resolution for faster startup
+                                height: { ideal: 720 },  // but better than the initial one
+                                frameRate: { ideal: 60 } // Good enough framerate
+                            },
+                            audio: false
+                        });
+                        
+                        // Replace the video element's srcObject
+                        video.srcObject = mediumResStream;
+                        
+                        // Replace the tracks in the RTCPeerConnection
+                        const senders = peerConnection.getSenders();
+                        const videoSender = senders.find(sender => 
+                            sender.track && sender.track.kind === 'video'
+                        );
+                        
+                        if (videoSender) {
+                            videoSender.replaceTrack(mediumResStream.getVideoTracks()[0]);
+                            console.log("Forced track replacement to reinitialize media flow");
+                        }
+                        
+                        // Stop old tracks after replacement
+                        oldTracks.forEach(track => track.stop());
+                        
+                        // Update our stream reference
+                        stream = mediumResStream;
+                        
+                        // Schedule a higher-res upgrade only after we've actually seen some frames
+                        const checkForFrames = setInterval(() => {
+                            if (hasReceivedFirstFrame) {
+                                clearInterval(checkForFrames);
+                                
+                                // Wait a bit before upgrading to high resolution
+                                setTimeout(async () => {
+                                    try {
+                                        console.log("Upgrading to high resolution after successful media flow");
+                                        // Stop medium-res tracks
+                                        const mediumTracks = stream.getTracks();
+                                        
+                                        // Get a high resolution stream
+                                        const highResStream = await navigator.mediaDevices.getUserMedia({
+                                            video: { 
+                                                width: { ideal: 1280 },
+                                                height: { ideal: 720 },
+                                                frameRate: { ideal: 60 }
+                                            },
+                                            audio: false
+                                        });
+                                        
+                                        // Replace the video element's srcObject
+                                        video.srcObject = highResStream;
+                                        
+                                        // Replace the tracks in the RTCPeerConnection
+                                        const senders = peerConnection.getSenders();
+                                        const videoSender = senders.find(sender => 
+                                            sender.track && sender.track.kind === 'video'
+                                        );
+                                        
+                                        if (videoSender) {
+                                            videoSender.replaceTrack(highResStream.getVideoTracks()[0]);
+                                            console.log("Upgraded to high resolution video");
+                                        }
+                                        
+                                        // Stop old tracks after replacement
+                                        mediumTracks.forEach(track => track.stop());
+                                        
+                                        // Update our stream reference
+                                        stream = highResStream;
+                                    } catch (err) {
+                                        console.warn("Failed to upgrade to high resolution:", err);
+                                    }
+                                }, 2000);
+                            }
+                        }, 500);
+                        
+                    } catch (err) {
+                        console.warn("Failed to upgrade resolution:", err);
+                        // Continue with the existing stream
+                    }
+                }
+            }, 3000);
+            
         } catch (error) {
             console.error('Connection error:', error);
             handleDisconnection(`Error: ${error.message || error}`);
@@ -625,10 +627,7 @@
     };
     
     // Auto-start when page loads
-    document.addEventListener('DOMContentLoaded', () => {
-        startGestureDetection();
-        updateServiceStatus();
-    });
+    document.addEventListener('DOMContentLoaded', startGestureDetection);
     </script>
 </body>
 </html>
