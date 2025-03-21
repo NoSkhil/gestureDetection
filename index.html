@@ -49,9 +49,8 @@
     
     #gesture-box {
         position: absolute;
-        border: 3px solid rgba(0, 255, 0, 0.8);
-        background-color: rgba(0, 255, 0, 0.1);
         pointer-events: none;
+        border: 3px solid green;
         z-index: 45;
     }
 
@@ -99,6 +98,7 @@
         z-index: 9999;
         transition: all 0.05s ease;
         box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        display: none;
     }
     
     #cursor.pinching {
@@ -157,25 +157,58 @@
     .action-button.toggled {
         background-color: #2196F3;
     }
+
+    .error-message {
+        color: #ff5722;
+        background-color: #ffe0d6;
+        border: 1px solid #ff5722;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 5px;
+    }
+
+    #debug-log {
+        max-height: 200px;
+        overflow-y: auto;
+        text-align: left;
+        font-family: monospace;
+        font-size: 12px;
+        background-color: #f5f5f5;
+        border: 1px solid #ddd;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 4px;
+        display: none;
+    }
+
+    #controls {
+        margin: 15px 0;
+    }
     </style>
 </head>
 <body>
     <h1>Gesture Detection Client</h1>
     
     <div id="status">Starting gesture detection...</div>
+    
+    <div id="error-container" style="display:none;" class="error-message">
+        <h3>Connection Error</h3>
+        <div id="error-message"></div>
+    </div>
+
+    <div id="controls">
+        <button id="startBtn" class="action-button">Start Camera</button>
+        <button id="stopBtn" class="action-button" disabled>Stop</button>
+        <button id="debugBtn" class="action-button">Toggle Debug Log</button>
+    </div>
+
+    <div id="debug-log"></div>
 
     <div id="media-container">
         <video id="video" autoplay playsinline></video>
-        <div id="status-overlay">Connecting...</div>
+        <div id="status-overlay">Initializing...</div>
         <div id="gesture-box"></div>
         <div id="fingertips-container"></div>
-        <div id="initialization-progress">
-            <div>Initializing Camera and Gesture Detection</div>
-            <div class="progress-bar">
-                <div class="progress-bar-fill"></div>
-            </div>
-            <div class="progress-text">Please wait (0%)...</div>
-        </div>
     </div>
     
     <div id="cursor"></div>
@@ -189,21 +222,55 @@
     const gestureBox = document.getElementById('gesture-box');
     const cursor = document.getElementById('cursor');
     const fingertipsContainer = document.getElementById('fingertips-container');
-    const initProgressContainer = document.getElementById('initialization-progress');
-    const progressBarFill = document.querySelector('.progress-bar-fill');
-    const progressText = document.querySelector('.progress-text');
+    const errorContainer = document.getElementById('error-container');
+    const errorMessage = document.getElementById('error-message');
+    const debugLog = document.getElementById('debug-log');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const debugBtn = document.getElementById('debugBtn');
     
     // Connection state
-    let peerConnection = null;
-    let dataChannel = null;
+    let ws = null;
     let lastPinch = false;
     let isConnected = false;
     let stream = null;
-    let initializationTimer = null;
     let hasReceivedFirstFrame = false;
+    let clientId = null;
+    let frameInterval = null;
+    const FRAME_RATE = 60; // frames per second
+    let canvas = document.createElement('canvas');
+    let ctx = canvas.getContext('2d');
     
-    // Generate a unique client ID
-    const clientId = 'client-' + Date.now();
+    // Toggle debug log visibility
+    function toggleDebugLog() {
+        if (debugLog.style.display === 'none') {
+            debugLog.style.display = 'block';
+        } else {
+            debugLog.style.display = 'none';
+        }
+    }
+    
+    // Add message to debug log
+    function logDebug(message) {
+        const now = new Date();
+        const timestamp = now.toISOString().substr(11, 8);
+        const logMsg = `[${timestamp}] ${message}`;
+        console.log(logMsg);
+        
+        const entry = document.createElement('div');
+        entry.textContent = logMsg;
+        debugLog.appendChild(entry);
+        
+        // Auto-scroll to bottom
+        debugLog.scrollTop = debugLog.scrollHeight;
+    }
+    
+    // Display error
+    function showError(message) {
+        errorContainer.style.display = 'block';
+        errorMessage.textContent = message;
+        logDebug(`ERROR: ${message}`);
+    }
     
     // Initialize gesture box size
     function setupGestureBox() {
@@ -230,24 +297,27 @@
         cursor.style.top = `${window.innerHeight / 2}px`;
         
         // Report dimensions to server
-        reportDimensions();
+        sendClientConfig();
     }
     
-    // Report dimensions to server
-    function reportDimensions() {
-        if (!peerConnection || !isConnected) return;
+    // Send client configuration to server
+    function sendClientConfig() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            logDebug('Cannot send config: WebSocket not connected');
+            return;
+        }
         
-        fetch('/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                clientId: clientId,
-                screenWidth: window.innerWidth,
-                screenHeight: window.innerHeight,
-                videoWidth: video.videoWidth,
-                videoHeight: video.videoHeight
-            })
-        }).catch(err => console.error('Failed to update dimensions:', err));
+        const config = {
+            type: 'config',
+            clientId: clientId,
+            screenWidth: window.innerWidth,
+            screenHeight: window.innerHeight,
+            videoWidth: video.videoWidth || 1280,
+            videoHeight: video.videoHeight || 720
+        };
+        
+        ws.send(JSON.stringify(config));
+        logDebug('Sent client configuration to server');
     }
     
     // Handle pinch gesture
@@ -280,19 +350,42 @@
         }
     }
     
-    // Clean up resources
-    function cleanup() {
-        // Stop progress timer if running
-        if (initializationTimer) {
-            clearInterval(initializationTimer);
-            initializationTimer = null;
+    // Capture video frame and send to server
+    function captureAndSendFrame() {
+        if (!ws || ws.readyState !== WebSocket.OPEN || !stream) {
+            return;
         }
         
-        // Hide initialization progress
-        initProgressContainer.style.display = 'none';
-        
-        // Reset first frame flag
-        hasReceivedFirstFrame = false;
+        try {
+            // Resize canvas to match video dimensions
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+            
+            // Draw video frame on canvas
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Convert to base64
+            const frameData = canvas.toDataURL('image/jpeg', 0.7); // compression quality 0.7
+            
+            // Send to server
+            ws.send(JSON.stringify({
+                type: 'frame',
+                frameData: frameData
+            }));
+        } catch (err) {
+            logDebug(`Error capturing frame: ${err.message}`);
+        }
+    }
+    
+    // Clean up resources
+    function cleanup() {
+        // Clear frame sending interval
+        if (frameInterval) {
+            clearInterval(frameInterval);
+            frameInterval = null;
+        }
         
         // Stop video tracks
         if (stream) {
@@ -304,308 +397,199 @@
             video.srcObject = null;
         }
         
-        // Close peer connection
-        if (peerConnection) {
+        // Close WebSocket
+        if (ws) {
             try {
-                peerConnection.close();
+                ws.close();
             } catch (e) {
-                console.error('Error closing connection:', e);
+                logDebug('Error closing WebSocket: ' + e);
             }
-            peerConnection = null;
+            ws = null;
         }
         
-        dataChannel = null;
         isConnected = false;
+        hasReceivedFirstFrame = false;
         
         // Hide cursor
         cursor.style.display = 'none';
         
         // Clear fingertips
         fingertipsContainer.innerHTML = '';
+        
+        // Update UI
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusText.textContent = 'Disconnected';
+        statusOverlay.textContent = 'Disconnected';
+    }
+    
+    // Initialize WebSocket connection
+    function initWebSocket() {
+        // Determine WebSocket URL based on current page protocol (ws or wss)
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        
+        logDebug(`Connecting to WebSocket at ${wsUrl}`);
+        
+        // Create WebSocket
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+            logDebug('WebSocket connection established');
+            isConnected = true;
+            statusText.textContent = 'Connected';
+            statusOverlay.textContent = 'Connected';
+        };
+        
+        ws.onclose = (event) => {
+            logDebug(`WebSocket closed: ${event.code} ${event.reason}`);
+            handleDisconnection('WebSocket connection closed');
+        };
+        
+        ws.onerror = (error) => {
+            logDebug('WebSocket error');
+            showError('WebSocket connection error');
+        };
+        
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                
+                // Handle connected message with client ID
+                if (data.type === 'connected') {
+                    clientId = data.clientId;
+                    logDebug(`Received client ID: ${clientId}`);
+                    sendClientConfig();
+                    return;
+                }
+                
+                // Mark that we've received data
+                if (!hasReceivedFirstFrame) {
+                    hasReceivedFirstFrame = true;
+                    statusText.textContent = 'Connected - Ready';
+                    logDebug("First data received, connection successful!");
+                }
+                
+                // Handle hand visibility
+                if (data.handVisible === false) {
+                    statusOverlay.textContent = 'No hand detected';
+                    return;
+                }
+                
+                // Update cursor position
+                if (data.cursorX !== null && data.cursorY !== null) {
+                    cursor.style.left = `${data.cursorX}px`;
+                    cursor.style.top = `${data.cursorY}px`;
+                    
+                    // Update status text
+                    statusOverlay.textContent = data.pinchStatus ? 
+                        'Pinch' : 'Hand detected';
+                }
+                
+                // Visualize fingertips if present
+                if (data.fingertips && Array.isArray(data.fingertips)) {
+                    // Clear previous fingertip markers
+                    fingertipsContainer.innerHTML = '';
+                    
+                    // Get video container position for proper placement
+                    const rect = video.getBoundingClientRect();
+                    
+                    // Create fingertip visualization dots
+                    const tipClasses = ['thumb-tip', 'index-tip', 'middle-tip', 'ring-tip', 'pinky-tip'];
+                    
+                    data.fingertips.forEach((tip, index) => {
+                        if (index < tipClasses.length) {
+                            const dot = document.createElement('div');
+                            dot.className = `fingertip ${tipClasses[index]}`;
+                            
+                            // Position relative to video element
+                            dot.style.left = `${tip.x * (rect.width / video.videoWidth)}px`;
+                            dot.style.top = `${tip.y * (rect.height / video.videoHeight)}px`;
+                            
+                            fingertipsContainer.appendChild(dot);
+                        }
+                    });
+                }
+                
+                // Handle pinch state changes
+                if (data.pinchStatus !== lastPinch) {
+                    handlePinch(data.pinchStatus);
+                    lastPinch = data.pinchStatus;
+                }
+            } catch (err) {
+                logDebug('Error processing server message: ' + err);
+            }
+        };
     }
     
     // Start gesture detection
     async function startGestureDetection() {
         try {
+            // Show debug log
+            debugLog.style.display = 'block';
+            
+            // Hide error messages
+            errorContainer.style.display = 'none';
+            
             // Clean up any existing connection
             cleanup();
             
+            // Clear debug log
+            debugLog.innerHTML = '';
+            
+            logDebug('Starting gesture detection...');
+            
             // Update UI
-            statusText.textContent = 'Connecting...';
-            statusOverlay.textContent = 'Connecting...';
+            statusText.textContent = 'Initializing...';
+            statusOverlay.textContent = 'Initializing...';
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
             
+            // Initialize WebSocket
+            initWebSocket();
             
-            // Get camera stream with aggressive resolution constraints
-            // Try to get the most minimal reliable camera resolution first
+            // Request camera access
+            logDebug('Requesting camera access...');
             try {
-                // First, explicitly request the lowest usable resolution
-                // to minimize startup time and maximize compatibility
                 stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        width: { exact: 320 },  // Force very low resolution
-                        height: { exact: 240 }, // to start with
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
                         frameRate: { ideal: 30 }
                     },
                     audio: false
                 });
                 
-                console.log("Camera initialized with 320x240 resolution");
-            } catch (err) {
-                console.warn("Could not initialize camera with exact resolution, trying constraints:", err);
+                logDebug(`Camera initialized with resolution: ${stream.getVideoTracks()[0].getSettings().width}x${stream.getVideoTracks()[0].getSettings().height}`);
                 
-                // Fall back to more relaxed constraints
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: true,  // Just ask for any video - let the browser decide
-                    audio: false
-                });
+                // Set video source
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    logDebug(`Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+                    setupGestureBox();
+                    
+                    // Start sending frames
+                    const frameDelay = 1000 / FRAME_RATE;
+                    frameInterval = setInterval(captureAndSendFrame, frameDelay);
+                    logDebug(`Started frame capture at ${FRAME_RATE} FPS`);
+                };
                 
-                console.log("Camera initialized with default resolution");
+            } catch (cameraErr) {
+                showError(`Camera access error: ${cameraErr.message}`);
+                cleanup();
+                return;
             }
-            
-            // Display video
-            video.srcObject = stream;
-            video.onloadedmetadata = setupGestureBox;
-            
-            // Create WebRTC connection
-            peerConnection = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
-            
-            // Handle connection state changes
-            peerConnection.onconnectionstatechange = () => {
-                console.log('Connection state:', peerConnection.connectionState);
-                if (peerConnection.connectionState === 'connected') {
-                    isConnected = true;
-                    statusText.textContent = 'Connected - Initializing Media';
-                } else if (peerConnection.connectionState === 'failed' || 
-                         peerConnection.connectionState === 'closed') {
-                    handleDisconnection("Connection lost");
-                }
-            };
-            
-            // Handle ICE connection state changes
-            peerConnection.oniceconnectionstatechange = () => {
-                console.log('ICE connection state:', peerConnection.iceConnectionState);
-                if (peerConnection.iceConnectionState === 'disconnected' ||
-                    peerConnection.iceConnectionState === 'failed' ||
-                    peerConnection.iceConnectionState === 'closed') {
-                    handleDisconnection("ICE connection failed");
-                }
-            };
-            
-            // Create data channel
-            dataChannel = peerConnection.createDataChannel('gesture-data');
-            dataChannel.onopen = () => {
-                statusText.textContent = 'Connected - Waiting for video';
-                statusOverlay.textContent = 'Starting up...';
-                isConnected = true;
-            };
-            
-            dataChannel.onclose = () => {
-                handleDisconnection("Data channel closed");
-            };
-            
-            // Handle incoming cursor data
-            dataChannel.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    
-                    // Mark that we've received our first frame
-                    if (!hasReceivedFirstFrame) {
-                        hasReceivedFirstFrame = true;
-                        statusText.textContent = 'Connected - Ready';
-                    }
-                    
-                    // Handle hand visibility
-                    if (data.handVisible === false) {
-                        statusOverlay.textContent = 'No hand detected';
-                        return;
-                    }
-                    
-                    // Update cursor position
-                    if (data.cursorX !== null && data.cursorY !== null) {
-                        cursor.style.left = `${data.cursorX}px`;
-                        cursor.style.top = `${data.cursorY}px`;
-                        
-                        // Update status text
-                        statusOverlay.textContent = data.pinchStatus ? 
-                            'Pinch' : 'Hand detected';
-                    }
-                    
-                    // Visualize fingertips if present
-                    if (data.fingertips && Array.isArray(data.fingertips)) {
-                        // Clear previous fingertip markers
-                        fingertipsContainer.innerHTML = '';
-                        
-                        // Get video container position for proper placement
-                        const rect = video.getBoundingClientRect();
-                        
-                        // Create fingertip visualization dots
-                        const tipClasses = ['thumb-tip', 'index-tip', 'middle-tip', 'ring-tip', 'pinky-tip'];
-                        
-                        data.fingertips.forEach((tip, index) => {
-                            if (index < tipClasses.length) {
-                                const dot = document.createElement('div');
-                                dot.className = `fingertip ${tipClasses[index]}`;
-                                
-                                // Position relative to video element
-                                dot.style.left = `${tip.x * (rect.width / video.videoWidth)}px`;
-                                dot.style.top = `${tip.y * (rect.height / video.videoHeight)}px`;
-                                
-                                fingertipsContainer.appendChild(dot);
-                            }
-                        });
-                    }
-                    
-                    // Handle pinch state changes
-                    if (data.pinchStatus !== lastPinch) {
-                        handlePinch(data.pinchStatus);
-                        lastPinch = data.pinchStatus;
-                    }
-                } catch (err) {
-                    console.error('Error processing data:', err);
-                }
-            };
-            
-            // Add tracks to connection
-            stream.getTracks().forEach(track => {
-                peerConnection.addTrack(track, stream);
-            });
-            
-            // Create and send offer
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            
-            // Send offer with screen dimensions
-            const response = await fetch('/offer', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    sdp: offer.sdp,
-                    type: offer.type,
-                    clientId: clientId,
-                    screenWidth: window.innerWidth,
-                    screenHeight: window.innerHeight,
-                    videoWidth: video.offsetWidth || 1280,
-                    videoHeight: video.offsetHeight || 720
-                })
-            });
-            
-            if (!response.ok) {
-                throw new Error(`Server returned ${response.status}: ${response.statusText}`);
-            }
-            
-            // Set remote description
-            const answer = await response.json();
-            if (answer.error) {
-                throw new Error(`Server error: ${answer.error}`);
-            }
-            
-            await peerConnection.setRemoteDescription(answer);
-            
-            // After 5 seconds, try to upgrade the camera resolution
-            // This helps get a quicker initial connection with the lower res,
-            // then improve quality once everything is working
-            setTimeout(async () => {
-                if (isConnected) {
-                    console.log("Attempting to upgrade video resolution to help initialize media flow");
-                    try {
-                        // Stop old tracks
-                        const oldTracks = stream.getTracks();
-                        
-                        // Get a medium resolution stream - not too high to avoid delays
-                        const mediumResStream = await navigator.mediaDevices.getUserMedia({
-                            video: { 
-                                width: { ideal: 1280 },   // Medium resolution for faster startup
-                                height: { ideal: 720 },  // but better than the initial one
-                                frameRate: { ideal: 60 } // Good enough framerate
-                            },
-                            audio: false
-                        });
-                        
-                        // Replace the video element's srcObject
-                        video.srcObject = mediumResStream;
-                        
-                        // Replace the tracks in the RTCPeerConnection
-                        const senders = peerConnection.getSenders();
-                        const videoSender = senders.find(sender => 
-                            sender.track && sender.track.kind === 'video'
-                        );
-                        
-                        if (videoSender) {
-                            videoSender.replaceTrack(mediumResStream.getVideoTracks()[0]);
-                            console.log("Forced track replacement to reinitialize media flow");
-                        }
-                        
-                        // Stop old tracks after replacement
-                        oldTracks.forEach(track => track.stop());
-                        
-                        // Update our stream reference
-                        stream = mediumResStream;
-                        
-                        // Schedule a higher-res upgrade only after we've actually seen some frames
-                        const checkForFrames = setInterval(() => {
-                            if (hasReceivedFirstFrame) {
-                                clearInterval(checkForFrames);
-                                
-                                // Wait a bit before upgrading to high resolution
-                                setTimeout(async () => {
-                                    try {
-                                        console.log("Upgrading to high resolution after successful media flow");
-                                        // Stop medium-res tracks
-                                        const mediumTracks = stream.getTracks();
-                                        
-                                        // Get a high resolution stream
-                                        const highResStream = await navigator.mediaDevices.getUserMedia({
-                                            video: { 
-                                                width: { ideal: 1280 },
-                                                height: { ideal: 720 },
-                                                frameRate: { ideal: 60 }
-                                            },
-                                            audio: false
-                                        });
-                                        
-                                        // Replace the video element's srcObject
-                                        video.srcObject = highResStream;
-                                        
-                                        // Replace the tracks in the RTCPeerConnection
-                                        const senders = peerConnection.getSenders();
-                                        const videoSender = senders.find(sender => 
-                                            sender.track && sender.track.kind === 'video'
-                                        );
-                                        
-                                        if (videoSender) {
-                                            videoSender.replaceTrack(highResStream.getVideoTracks()[0]);
-                                            console.log("Upgraded to high resolution video");
-                                        }
-                                        
-                                        // Stop old tracks after replacement
-                                        mediumTracks.forEach(track => track.stop());
-                                        
-                                        // Update our stream reference
-                                        stream = highResStream;
-                                    } catch (err) {
-                                        console.warn("Failed to upgrade to high resolution:", err);
-                                    }
-                                }, 2000);
-                            }
-                        }, 500);
-                        
-                    } catch (err) {
-                        console.warn("Failed to upgrade resolution:", err);
-                        // Continue with the existing stream
-                    }
-                }
-            }, 3000);
             
         } catch (error) {
-            console.error('Connection error:', error);
-            handleDisconnection(`Error: ${error.message || error}`);
+            logDebug(`Initialization error: ${error.message}`);
+            showError(`Initialization failed: ${error.message}`);
+            cleanup();
         }
     }
     
     // Handle disconnection
     function handleDisconnection(reason) {
+        logDebug('Disconnection: ' + reason);
         statusText.textContent = reason || 'Connection lost';
         statusOverlay.textContent = 'Disconnected';
         isConnected = false;
@@ -618,6 +602,11 @@
     window.addEventListener('resize', () => {
         if (video.offsetWidth) {
             setupGestureBox();
+            
+            // Update client dimensions if connected
+            if (isConnected) {
+                sendClientConfig();
+            }
         }
     });
     
@@ -626,8 +615,10 @@
         cleanup();
     };
     
-    // Auto-start when page loads
-    document.addEventListener('DOMContentLoaded', startGestureDetection);
+    // Event listeners
+    startBtn.addEventListener('click', startGestureDetection);
+    stopBtn.addEventListener('click', cleanup);
+    debugBtn.addEventListener('click', toggleDebugLog);
     </script>
 </body>
 </html>

@@ -8,22 +8,21 @@ import numpy as np
 import cv2
 import mediapipe as mp
 import weakref
+import base64
+from io import BytesIO
 
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
-from aiortc.contrib.media import MediaRelay
-
+import aiohttp
 
 """
+WebSocket-based Touchless Interaction System:
 
-1. Video Processing Service - Handles WebRTC connections and video frame processing
+1. Video Processing Service - Handles WebSocket connections and video frame processing
 2. Hand Detection Service - Detects hand landmarks using MediaPipe
 3. Gesture Recognition Service - Interprets hand landmarks into gestures
 4. Cursor Control Service - Translates hand position to cursor coordinates
 5. Interaction Feedback Service - Provides visual feedback to the client
-
 """
-
 
 # Configure logging
 logging.basicConfig(
@@ -32,11 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("touchless-interaction")
 
-# Disable noisy loggers
-logging.getLogger('aiortc.rtcrtpreceiver').setLevel(logging.CRITICAL)
-logging.getLogger('aioice').setLevel(logging.CRITICAL)
-
-# Global state (would be separate databases/caches in a true microservice architecture)
+# Global state instead of database
 client_dimensions = {}
 active_connections = weakref.WeakSet()
 
@@ -45,15 +40,13 @@ class VideoProcessingService:
     """
     Video Processing Service
 
-    - Capturing and processing webcam feed in real-time
-    - Handling WebRTC connections
+    - Processing WebSocket video streams
     - Processing frames from clients
     - Maintaining connection state
     """
     
     def __init__(self):
         """Initialize the Video Processing Service"""
-        self.media_relay = MediaRelay()
         self.start_time = time.time()
         
     def get_status(self):
@@ -64,33 +57,22 @@ class VideoProcessingService:
             "activeConnections": len(active_connections),
             "uptime": time.time() - self.start_time
         }
-    
-    def create_peer_connection(self, client_id):
-        """Create a new WebRTC peer connection"""
-        pc = RTCPeerConnection()
-        active_connections.add(pc)
         
-        return pc
-        
-    def subscribe_to_track(self, track):
-        """Subscribe to a media track using MediaRelay"""
-        return self.media_relay.subscribe(track)
-        
-    def process_frame(self, frame):
-        """Process raw video frame"""
-        # Convert YUV to RGB for MediaPipe processing
-        if hasattr(frame, 'to_ndarray'):
-            # aiortc frame
-            img_frame = frame.to_ndarray(format="yuv420p")
-            rgb_frame = cv2.cvtColor(img_frame, cv2.COLOR_YUV420P2RGB)
-        else:
-            # Already ndarray
-            rgb_frame = frame
+    def process_frame(self, frame_data):
+        """Process raw video frame from base64 data"""
+        try:
+            # Decode base64 image
+            img_bytes = base64.b64decode(frame_data.split(',')[1])
+            img_np = np.frombuffer(img_bytes, dtype=np.uint8)
+            img_frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
             
-        # Flip horizontally for natural interaction
-        rgb_frame = cv2.flip(rgb_frame, 1)
-        
-        return rgb_frame
+            # Flip horizontally for natural interaction
+            rgb_frame = cv2.flip(img_frame, 1)
+            
+            return rgb_frame
+        except Exception as e:
+            logger.error(f"Error processing frame: {e}")
+            return None
 
 
 class HandDetectionService:
@@ -193,7 +175,7 @@ class GestureRecognitionService:
         if is_pinching:
             self.gesture_counts["pinch"] += 1
             
-        return is_pinching
+        return bool(is_pinching)  # Convert np.bool_ to Python bool
         
     def detect_point(self, landmarks):
         """
@@ -367,7 +349,7 @@ class InteractionFeedbackService:
         return {
             'cursorX': cursor_x,
             'cursorY': cursor_y,
-            'pinchStatus': pinch_status,
+            'pinchStatus': bool(pinch_status),  # Convert np.bool_ to Python bool
             'handVisible': True,
             'fingertips': fingertips
         }
@@ -394,204 +376,105 @@ class SystemIntegrationService:
         # For serializing NumPy types
         self.numpy_encoder = NumpyEncoder()
         
-    async def process_offer(self, offer_params):
-        """Process WebRTC offer and setup connection"""
-        offer = RTCSessionDescription(sdp=offer_params["sdp"], type=offer_params["type"])
-        client_id = offer_params.get("clientId", f"client-{uuid.uuid4()}")
+        # WebSocket connections
+        self.websockets = {}
         
-        # Store client dimensions if provided
-        if "screenWidth" in offer_params and "screenHeight" in offer_params:
-            client_dimensions[client_id] = {
-                'screenWidth': offer_params.get('screenWidth', 1920),
-                'screenHeight': offer_params.get('screenHeight', 1080),
-                'videoWidth': offer_params.get('videoWidth', 1280),
-                'videoHeight': offer_params.get('videoHeight', 720)
-            }
+    async def handle_websocket(self, request):
+        """Handle WebSocket connection"""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
         
-        # Create peer connection using Video Processing Service
-        pc = self.video_service.create_peer_connection(client_id)
-        pc_id = f"PeerConnection({uuid.uuid4()})"
+        client_id = f"client-{uuid.uuid4()}"
+        self.websockets[client_id] = ws
+        active_connections.add(ws)
         
-        # State for this connection
-        data_channel = None
-        frame_processing_active = True
+        logger.info(f"New WebSocket connection established: {client_id}")
         
-        def log_info(msg, *args):
-            logger.info(pc_id + " " + msg, *args)
-        
-        # Handle connection state changes
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange():
-            log_info(f"Connection state changed to {pc.connectionState}")
-            nonlocal frame_processing_active
-            
-            if pc.connectionState == "failed" or pc.connectionState == "closed":
-                # Stop processing if connection is closed or failed
-                frame_processing_active = False
-                
-                # Clean up if this connection is in our active set
-                if pc in active_connections:
-                    active_connections.remove(pc)
-                    log_info("Connection removed from active set")
-        
-        # Handle data channel creation
-        @pc.on("datachannel")
-        def on_datachannel(channel):
-            nonlocal data_channel
-            data_channel = channel
-            log_info("Data channel opened")
-            
-            @channel.on("close")
-            def on_close():
-                nonlocal frame_processing_active
-                frame_processing_active = False
-                log_info("Data channel closed")
-        
-        # Handle video track
-        @pc.on("track")
-        def on_track(track):
-            if track.kind != "video":
-                return
-
-            log_info(f"Video track added, waiting for media to start flowing")
-            
-            # Use Video Processing Service to subscribe to track
-            receiver = self.video_service.subscribe_to_track(track)
-            
-            # Store last sent cursor position for smoothing
-            last_cursor_x, last_cursor_y = None, None
-            
-            # Set up task for frame processing
-            task = None
-            
-            async def process_frames():
-                nonlocal frame_processing_active, last_cursor_x, last_cursor_y
-                frame_count = 0
-                
-                try:
-                    while frame_processing_active:
-                        if pc.connectionState in ["failed", "closed"]:
-                            log_info("Connection closed, stopping frame processing")
-                            break
-                            
-                        frame_start_time = time.time()
-                        
-                        try:
-                            # Consistent timeout for frame reception
-                            frame = await asyncio.wait_for(receiver.recv(), timeout=1.0)
-                            
-                            # Log first frame received
-                            if frame_count == 0:
-                                log_info("First frame received - media flow established")
-                            
-                            # Process frame with Video Processing Service
-                            rgb_frame = self.video_service.process_frame(frame)
-                            height, width, _ = rgb_frame.shape
-                            
-                            # Detect hand landmarks with Hand Detection Service
-                            landmarks = self.hand_detection.detect_hands(rgb_frame)
-                            
-                            # Process landmarks if hand is detected
-                            if landmarks and data_channel and data_channel.readyState == "open":
-                                # Detect gestures with Gesture Recognition Service
-                                pinch_status = self.gesture_recognition.detect_pinch(landmarks)
-                                
-                                # Calculate cursor position with Cursor Control Service
-                                cursor_x, cursor_y = self.cursor_control.calculate_cursor_position(
-                                    landmarks, client_id
-                                )
-                                
-                                # Prepare feedback with Interaction Feedback Service
-                                feedback_data = self.feedback_service.prepare_feedback_data(
-                                    client_id,
-                                    landmarks,
-                                    rgb_frame.shape,
-                                    cursor_x,
-                                    cursor_y,
-                                    pinch_status
-                                )
-                                
-                                # Send cursor data
-                                try:
-                                    data_channel.send(json.dumps(feedback_data, cls=NumpyEncoder))
-                                except Exception as e:
-                                    log_info(f"Data send error: {e}")
-                                    if "closed" in str(e).lower():
-                                        # Channel is closed, stop processing
-                                        frame_processing_active = False
-                                        break
-                            elif data_channel and data_channel.readyState == "open":
-                                # Send hand not visible status via Feedback Service
-                                try:
-                                    data_channel.send(json.dumps({
-                                        'handVisible': False,
-                                        'pinchStatus': False
-                                    }))
-                                except Exception as e:
-                                    log_info(f"Data send error: {e}")
-                                    if "closed" in str(e).lower():
-                                        # Channel is closed, stop processing
-                                        frame_processing_active = False
-                                        break
-                            
-                            # Log performance metrics occasionally
-                            if frame_count % 300 == 0:  # Further reduce log frequency 
-                                processing_time = time.time() - frame_start_time
-                                log_info(f"Frame processing time - {processing_time:.4f}s")
-                            
-                            frame_count += 1
-                            
-                        except asyncio.TimeoutError:
-                            # Simplified timeout handling
-                            if frame_count == 0:
-                                log_info("Waiting for initial video frames...")
-                            
-                            # Check connection state
-                            if pc.connectionState in ["failed", "closed"] or (data_channel and data_channel.readyState != "open"):
-                                frame_processing_active = False
-                                break
-                        except Exception as e:
-                            log_info(f"Frame processing error: {str(e)}")
-                            # Continue processing other frames instead of breaking
-                
-                except asyncio.CancelledError:
-                    log_info("Frame processing task cancelled")
-                finally:
-                    log_info("Frame processing stopped")
-                    frame_processing_active = False
-                    
-                    # Clean up if this connection is in our active set
-                    if pc in active_connections:
-                        active_connections.remove(pc)
-            
-            # Create and store the task
-            task = asyncio.create_task(process_frames())
-            
-            # Clean up when track ends
-            @track.on("ended")
-            async def on_ended():
-                nonlocal frame_processing_active
-                frame_processing_active = False
-                if task is not None:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-        
-        # Handle WebRTC offer
         try:
-            await pc.setRemoteDescription(offer)
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
-
-            return {
-                "sdp": pc.localDescription.sdp, 
-                "type": pc.localDescription.type
-            }
+            # Send initial confirmation
+            await ws.send_json({"type": "connected", "clientId": client_id})
+            
+            # Process incoming messages
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        message_type = data.get('type')
+                        
+                        if message_type == 'config':
+                            # Handle client configuration
+                            client_dimensions[client_id] = {
+                                'screenWidth': data.get('screenWidth', 1920),
+                                'screenHeight': data.get('screenHeight', 1080),
+                                'videoWidth': data.get('videoWidth', 1280),
+                                'videoHeight': data.get('videoHeight', 720)
+                            }
+                            logger.info(f"Client config updated for {client_id}")
+                            
+                        elif message_type == 'frame':
+                            # Process video frame
+                            frame_data = data.get('frameData')
+                            if frame_data:
+                                # Convert base64 frame to image
+                                rgb_frame = self.video_service.process_frame(frame_data)
+                                
+                                if rgb_frame is not None:
+                                    # Detect hands
+                                    landmarks = self.hand_detection.detect_hands(rgb_frame)
+                                    
+                                    # Process if hand is detected
+                                    if landmarks:
+                                        # Detect gestures
+                                        pinch_status = self.gesture_recognition.detect_pinch(landmarks)
+                                        
+                                        # Calculate cursor position
+                                        cursor_x, cursor_y = self.cursor_control.calculate_cursor_position(
+                                            landmarks, client_id
+                                        )
+                                        
+                                        # Prepare feedback
+                                        feedback_data = self.feedback_service.prepare_feedback_data(
+                                            client_id,
+                                            landmarks,
+                                            rgb_frame.shape,
+                                            cursor_x,
+                                            cursor_y,
+                                            pinch_status
+                                        )
+                                        
+                                        # Send feedback data
+                                        # Use dumps with the custom encoder instead of send_json
+                                        await ws.send_str(json.dumps(feedback_data, cls=NumpyEncoder))
+                                    else:
+                                        # Send hand not visible status
+                                        await ws.send_json({
+                                            'handVisible': False,
+                                            'pinchStatus': False
+                                        })
+                                    
+                        else:
+                            logger.warning(f"Unknown message type: {message_type}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing message: {e}")
+                
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.error(f"WebSocket connection closed with exception: {ws.exception()}")
+                    break
+            
         except Exception as e:
-            logger.exception(f"Error handling offer: {e}")
-            raise e
+            logger.exception(f"WebSocket error: {e}")
+        finally:
+            # Clean up when connection is closed
+            if client_id in self.websockets:
+                del self.websockets[client_id]
+            if client_id in client_dimensions:
+                del client_dimensions[client_id]
+            if ws in active_connections:
+                active_connections.remove(ws)
+            logger.info(f"WebSocket connection closed: {client_id}")
+        
+        return ws
     
     def get_system_status(self):
         """Get comprehensive status of all services"""
@@ -619,7 +502,7 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         elif isinstance(obj, np.bool_):
-            return bool(obj)
+            return bool(obj)  # Convert NumPy boolean to Python boolean
         return super(NumpyEncoder, self).default(obj)
 
 
@@ -632,40 +515,6 @@ async def index(request):
     """Serve the index page"""
     content = open("index.html", "r").read()
     return web.Response(content_type="text/html", text=content)
-
-async def client_config(request):
-    """Handle client configuration updates"""
-    params = await request.json()
-    client_id = params.get("clientId")
-    
-    if client_id:
-        client_dimensions[client_id] = {
-            'screenWidth': params.get('screenWidth', 1920),
-            'screenHeight': params.get('screenHeight', 1080),
-            'videoWidth': params.get('videoWidth', 1280),
-            'videoHeight': params.get('videoHeight', 720)
-        }
-        return web.Response(text=json.dumps({"status": "success"}))
-    
-    return web.Response(status=400, text=json.dumps({"status": "error", "message": "Client ID required"}))
-
-async def offer(request):
-    """Handle WebRTC offer"""
-    params = await request.json()
-    
-    try:
-        result = await system_service.process_offer(params)
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(result)
-        )
-    except Exception as e:
-        logger.exception(f"Error handling offer: {e}")
-        return web.Response(
-            status=500,
-            content_type="application/json",
-            text=json.dumps({"error": str(e)})
-        )
 
 async def status(request):
     """Return system status"""
@@ -684,13 +533,13 @@ async def cleanup_inactive_connections():
             
             # Check each connection
             to_remove = []
-            for pc in active_connections:
-                if pc.connectionState in ["failed", "closed"]:
-                    to_remove.append(pc)
+            for ws in active_connections:
+                if ws.closed:
+                    to_remove.append(ws)
             
             # Remove dead connections
-            for pc in to_remove:
-                active_connections.remove(pc)
+            for ws in to_remove:
+                active_connections.remove(ws)
                 
             await asyncio.sleep(60)  # Check every minute
         except Exception as e:
@@ -712,37 +561,33 @@ async def cleanup_background_tasks(app):
     logger.info("Canceled background cleanup task")
     
     # Close all active connections
-    for pc in list(active_connections):
-        pc.close()
+    for ws in list(active_connections):
+        await ws.close()
     logger.info("Closed all active connections")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Touchless Interaction System")
+    parser = argparse.ArgumentParser(description="Touchless Interaction System (WebSocket Version)")
     parser.add_argument("--host", default="0.0.0.0", help="Host for HTTP server")
     parser.add_argument("--port", type=int, default=8080, help="Port for HTTP server")
     args = parser.parse_args()
 
-    # Initialize the application
     app = web.Application()
     
-    # Setup routes
     app.router.add_get("/", index)
-    app.router.add_post("/offer", offer)
-    app.router.add_post("/config", client_config)
+    app.router.add_get("/ws", system_service.handle_websocket)
     app.router.add_get("/status", status)
 
-    # Enable background tasks
+    # Background tasks to cleanup stale connections
     app.on_startup.append(start_background_tasks)
     app.on_cleanup.append(cleanup_background_tasks)
 
-    # Initialize MediaPipe with a test frame to ensure it's loaded
+    # Initialize MediaPipe with a test frame
     dummy_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     for _ in range(3):
         system_service.hand_detection.detect_hands(dummy_frame)
     logger.info("MediaPipe hands initialized")
     
-    # Start the server
     web.run_app(
         app, 
         host=args.host, 
