@@ -10,8 +10,9 @@ import mediapipe as mp
 import weakref
 import base64
 from io import BytesIO
-
+import os
 from aiohttp import web
+from dotenv import load_dotenv
 import aiohttp
 
 """
@@ -23,6 +24,50 @@ WebSocket-based Touchless Interaction System:
 4. Cursor Control Service - Translates hand position to cursor coordinates
 5. Interaction Feedback Service - Provides visual feedback to the client
 """
+
+def load_config():
+    """
+    Load configuration from environment variables or .env file
+    
+    Returns:
+        dict: Configuration dictionary with all settings
+    """
+    load_dotenv()
+    
+    # Create configuration dictionary
+    config = {
+        # Server Configuration
+        "server": {
+            "host": os.getenv("SERVER_HOST", "0.0.0.0"),
+            "port": int(os.getenv("SERVER_PORT", "8080")),
+            "log_level": os.getenv("LOG_LEVEL", "INFO"),
+            "version": os.getenv("SYSTEM_VERSION", "1.0.0"),
+            "name": os.getenv("SYSTEM_NAME", "touchless-interaction")
+        },
+        
+        # MediaPipe Configuration
+        "mediapipe": {
+            "min_detection_confidence": float(os.getenv("MP_MIN_DETECTION_CONFIDENCE", "0.5")),
+            "min_tracking_confidence": float(os.getenv("MP_MIN_TRACKING_CONFIDENCE", "0.5")),
+            "model_complexity": int(os.getenv("MP_MODEL_COMPLEXITY", "0")),
+            "max_num_hands": int(os.getenv("MP_MAX_NUM_HANDS", "1"))
+        },
+        
+        # Gesture Configuration
+        "gesture": {
+            "pinch_threshold": float(os.getenv("GESTURE_PINCH_THRESHOLD", "0.08")),
+            "cursor_smoothing": float(os.getenv("CURSOR_SMOOTHING_FACTOR", "0.5"))
+        },
+        
+        # System Behavior
+        "system": {
+            "cleanup_interval": int(os.getenv("CLEANUP_INTERVAL_SECONDS", "60"))
+        }
+    }
+    
+    return config
+
+config = load_config()
 
 # Configure logging
 logging.basicConfig(
