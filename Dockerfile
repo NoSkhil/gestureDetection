@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir \
     numpy==1.24.3 \
     opencv-python==4.8.0.74 \
     mediapipe
+    dotenv
 
 # Copy application files
 COPY app.py /app/server.py

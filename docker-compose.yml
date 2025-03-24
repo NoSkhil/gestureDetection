@@ -6,3 +6,23 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    environment:
+      # Server Configuration
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - LOG_LEVEL=INFO
+      - SYSTEM_VERSION=1.0.0
+      - SYSTEM_NAME=touchless-interaction
+      
+      # MediaPipe Configuration
+      - MP_MIN_DETECTION_CONFIDENCE=0.5
+      - MP_MIN_TRACKING_CONFIDENCE=0.5
+      - MP_MODEL_COMPLEXITY=0
+      - MP_MAX_NUM_HANDS=1
+      
+      # Gesture Configuration
+      - GESTURE_PINCH_THRESHOLD=0.08
+      - CURSOR_SMOOTHING_FACTOR=0.5
+      
+      # System Behavior
+      - CLEANUP_INTERVAL_SECONDS=60
