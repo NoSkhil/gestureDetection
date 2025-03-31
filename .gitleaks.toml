@@ -1,0 +1,105 @@
+# Title for the gitleaks configuration
+title = "Touchless Interaction System Gitleaks Configuration"
+
+# Custom rules for detecting potential secrets specific to this project
+[[rules]]
+id = "api-key"
+description = "API Key"
+regex = '''(?i)(['"]?(?:api[_-]?key|apikey|api_token|auth[_-]?token|access[_-]?token|secret[_-]?key)['"]\s*[:=]\s*['"]?[a-zA-Z0-9_\-\.=]{16,64}['"]?)'''
+tags = ["key", "API", "credentials"]
+severity = "HIGH"
+
+[[rules]]
+id = "mediapipe-key"
+description = "MediaPipe related credentials"
+regex = '''(?i)(['"]?(?:mp[_-]?key|mediapipe[_-]?key|media[_-]?pipe[_-]?token|mp[_-]?token)['"]\s*[:=]\s*['"]?[a-zA-Z0-9_\-\.=]{16,64}['"]?)'''
+tags = ["key", "MediaPipe", "credentials"]
+severity = "HIGH"
+
+[[rules]]
+id = "websocket-token"
+description = "WebSocket security tokens"
+regex = '''(?i)(['"]?(?:ws[_-]?token|websocket[_-]?token|socket[_-]?key)['"]\s*[:=]\s*['"]?[a-zA-Z0-9_\-\.=]{16,64}['"]?)'''
+tags = ["key", "WebSocket", "credentials"]
+severity = "HIGH"
+
+[[rules]]
+id = "dotenv-secrets"
+description = "Sensitive variables in .env files"
+regex = '''(?i)(SERVER_HOST|SERVER_PORT|LOG_LEVEL|SYSTEM_VERSION|SYSTEM_NAME|MP_MIN_DETECTION_CONFIDENCE|MP_MIN_TRACKING_CONFIDENCE|MP_MODEL_COMPLEXITY|MP_MAX_NUM_HANDS|GESTURE_PINCH_THRESHOLD|CURSOR_SMOOTHING_FACTOR|CLEANUP_INTERVAL_SECONDS)[\s]*=[\s]*(.+)'''
+file = '''(\.env|\.env\..*|.*\.env)'''
+tags = ["env", "configuration"]
+severity = "MEDIUM"
+entropy = 0.0
+secretGroup = 2
+
+[[rules]]
+id = "password-assignment"
+description = "Password assignment"
+regex = '''(?i)(password|passwd|pwd)[\s]*=[\s]*['"]([^'"]{8,64})['"]'''
+tags = ["password", "credentials"]
+severity = "HIGH"
+secretGroup = 2
+entropy = 3.5
+
+[[rules]]
+id = "private-key"
+description = "Private key"
+regex = '''-----BEGIN ((RSA|DSA|EC|OPENSSH) )?PRIVATE KEY( BLOCK)?-----'''
+tags = ["key", "private"]
+severity = "CRITICAL"
+
+# Allow list - files and paths that should be ignored during scanning
+[allowlist]
+description = "Global allowlist for non-sensitive files and patterns"
+
+# Files to ignore
+files = [
+  # Test files
+  '''.*test\.py$''',
+  '''.*_test\.py$''',
+  '''test_.*\.py$''',
+  
+  # Documentation
+  '''.*\.md$''',
+  '''.*\.rst$''',
+  '''.*\.txt$''',
+  
+  # Examples
+  '''example.*\.py$''',
+  '''.*example.*\.json$''',
+  
+  # Generated files
+  '''.*\.min\.js$''',
+  '''.*bundle\.js$''',
+  
+  # Public files
+  '''index\.html$''',
+]
+
+# Paths to ignore
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)venv/''',
+  '''(^|/)env/''',
+  '''(^|/)\.env/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.vscode/''',
+  '''(^|/)\.idea/''',
+]
+
+# Regexes for allowlisted content
+regexes = [
+  '''sampleApiKey''',
+  '''example[_-]?key''',
+  '''dummy[_-]?secret''',
+  '''test[_-]?credentials'''
+]
+
+# Commits to ignore
+commits = [
+  # Add specific commit hashes if needed
+  # "YOUR_COMMIT_HASH",
+]

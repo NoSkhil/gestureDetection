@@ -14,6 +14,7 @@ import os
 from aiohttp import web
 from dotenv import load_dotenv
 import aiohttp
+import mlflow  # Added MLflow import
 
 """
 WebSocket-based Touchless Interaction System:
@@ -175,36 +176,75 @@ class HandDetectionService:
 
 class GestureRecognitionService:
     """
-    Gesture Recognition Service
+    Gesture Recognition Service with MLflow tracking
 
     - Interpreting hand positions as specific interaction gestures (pinch)
     - Mapping recognized gestures to system commands
+    - Tracking gesture metrics with MLflow
     """
     
     def __init__(self):
-        """Initialize the Gesture Recognition Service"""
+        """Initialize the Gesture Recognition Service with MLflow tracking"""
         self.start_time = time.time()
         self.gesture_counts = {
             "pinch": 0,
             "point": 0
         }
+        self.frame_count = 0
+        
+        # Initialize MLflow
+        try:
+            # Set tracking URI explicitly to local directory
+            tracking_uri = os.path.abspath("./mlruns")
+            logger.info(f"Setting MLflow tracking URI to: {tracking_uri}")
+            mlflow.set_tracking_uri(tracking_uri)
+            
+            mlflow.set_experiment("touchless-gestures")
+            logger.info("MLflow experiment set to: touchless-gestures")
+            
+            self.mlflow_run = mlflow.start_run(run_name="gesture-session")
+            self.run_id = self.mlflow_run.info.run_id
+            logger.info(f"MLflow run started with ID: {self.run_id}")
+            
+            # Get pinch threshold from config
+            pinch_threshold = config["gesture"]["pinch_threshold"]
+            
+            # Log the pinch threshold as a parameter
+            mlflow.log_param("pinch_threshold", pinch_threshold)
+            logger.info(f"Logged parameter: pinch_threshold = {pinch_threshold}")
+            
+            self.mlflow_enabled = True
+        except Exception as e:
+            logger.error(f"Failed to initialize MLflow: {e}")
+            self.mlflow_enabled = False
         
     def get_status(self):
         """Get current service status"""
-        return {
+        status = {
             "service": "gesture-recognition",
             "status": "online",
             "supportedGestures": ["pinch", "point"],
             "gesturesCounted": self.gesture_counts,
+            "framesProcessed": self.frame_count,
             "uptime": time.time() - self.start_time
         }
+        
+        if hasattr(self, 'mlflow_enabled') and self.mlflow_enabled:
+            status["mlflow"] = {
+                "enabled": True,
+                "run_id": getattr(self, 'run_id', None)
+            }
+        
+        return status
     
     def detect_pinch(self, landmarks):
         """
-        Detect pinch gesture between thumb and ring finger
+        Detect pinch gesture between thumb and ring finger with MLflow tracking
         """
         if not landmarks or len(landmarks) < 21:
             return False
+        
+        self.frame_count += 1
             
         thumb_tip = landmarks[4]
         ring_tip = landmarks[16]
@@ -215,22 +255,59 @@ class GestureRecognitionService:
             (thumb_tip.y - ring_tip.y)**2
         )
         
-        is_pinching = distance < 0.08  # threshold
+        # Get pinch threshold from config
+        pinch_threshold = config["gesture"]["pinch_threshold"]
+        is_pinching = distance < pinch_threshold
         
         if is_pinching:
             self.gesture_counts["pinch"] += 1
-            
+        
+        # Log to MLflow (only every 5th frame to reduce data volume)
+        if hasattr(self, 'mlflow_enabled') and self.mlflow_enabled and self.frame_count % 5 == 0:
+            try:
+                # Log frame's distance
+                mlflow.log_metric("pinch_distance", float(distance), step=self.frame_count)
+                
+                # Log when a pinch is detected
+                if is_pinching:
+                    mlflow.log_metric("pinch_detected", 1, step=self.frame_count)
+                    if self.gesture_counts["pinch"] % 10 == 0:  # Log less frequently to console
+                        logger.info(f"Logged pinch #{self.gesture_counts['pinch']} with distance {distance:.4f}")
+                else:
+                    mlflow.log_metric("pinch_detected", 0, step=self.frame_count)
+            except Exception as e:
+                logger.error(f"Error logging to MLflow: {e}")
+                
         return bool(is_pinching)  # Convert np.bool_ to Python bool
         
     def detect_point(self, landmarks):
         """
-        Pending
+        Detect point gesture
         """
         if not landmarks or len(landmarks) < 21:
             return False
             
         self.gesture_counts["point"] += 1
         return True
+        
+    def cleanup(self):
+        """End MLflow run when shutting down"""
+        if hasattr(self, 'mlflow_enabled') and self.mlflow_enabled:
+            try:
+                logger.info(f"Ending MLflow run: {self.run_id}")
+                
+                # Log summary metrics before closing
+                mlflow.log_metric("total_frames", self.frame_count)
+                mlflow.log_metric("total_pinches", self.gesture_counts["pinch"])
+                
+                if self.frame_count > 0:
+                    pinch_rate = (self.gesture_counts["pinch"] / self.frame_count) * 100
+                    mlflow.log_metric("pinch_rate_percent", pinch_rate)
+                
+                mlflow.end_run()
+                logger.info("MLflow run ended successfully")
+            except Exception as e:
+                logger.error(f"Error ending MLflow run: {e}")
 
 
 class CursorControlService:
@@ -609,6 +686,11 @@ async def cleanup_background_tasks(app):
     for ws in list(active_connections):
         await ws.close()
     logger.info("Closed all active connections")
+    
+    # Cleanup MLflow
+    if hasattr(system_service, 'gesture_recognition'):
+        system_service.gesture_recognition.cleanup()
+        logger.info("MLflow tracking ended")
 
 
 if __name__ == "__main__":
@@ -616,6 +698,14 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Host for HTTP server")
     parser.add_argument("--port", type=int, default=8080, help="Port for HTTP server")
     args = parser.parse_args()
+
+    # Print MLflow status at startup
+    try:
+        mlflow_uri = os.path.abspath("./mlruns")
+        logger.info(f"MLflow tracking URI: {mlflow_uri}")
+        logger.info(f"MLflow UI can be started with: mlflow ui --backend-store-uri {mlflow_uri}")
+    except Exception as e:
+        logger.error(f"MLflow initialization error: {e}")
 
     app = web.Application()
     
