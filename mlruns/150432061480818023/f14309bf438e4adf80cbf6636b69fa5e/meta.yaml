@@ -1,0 +1,15 @@
+artifact_uri: /Users/akhil/Desktop/sn_touchless_interaction/mlruns/150432061480818023/f14309bf438e4adf80cbf6636b69fa5e/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '150432061480818023'
+lifecycle_stage: active
+run_id: f14309bf438e4adf80cbf6636b69fa5e
+run_name: gesture-session
+run_uuid: f14309bf438e4adf80cbf6636b69fa5e
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1744418928060
+status: 1
+tags: []
+user_id: akhil
