@@ -27,12 +27,6 @@ WebSocket-based Touchless Interaction System:
 """
 
 def load_config():
-    """
-    Load configuration from environment variables or .env file
-    
-    Returns:
-        dict: Configuration dictionary with all settings
-    """
     load_dotenv()
     
     # Create configuration dictionary
